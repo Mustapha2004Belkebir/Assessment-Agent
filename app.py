@@ -1,8 +1,10 @@
 from flask import Flask, request, jsonify
 import pickle
 import numpy as np
+import pandas as pd
 import google.generativeai as genai
 from dotenv import load_dotenv
+from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder
 import os
 
 # Load environment variables
@@ -37,10 +39,66 @@ def index():
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
-        data = request.get_json()
-        features = np.array(data['features']).reshape(1, -1)
+        # Load input data from frontend
+        input_data = request.get_json()
+        answers = input_data['answers']  # Expecting a dict
+        
+        # Convert to DataFrame
+        data = pd.DataFrame([answers])  # One-row DataFrame
+
+        # --- Encoding Section ---
+        ordinal_columns = [
+            "Do you enjoy and feel comfortable with subjects like mathematics, physics, and biology?",
+            "Are you excited by combining theoretical learning with hands-on practical work?",
+            "How do you handle long study hours and challenging academic content?",
+            "How do you feel about public speaking or presenting?"
+        ]
+        ordinal_order = [
+            [
+                "I am very enthusiastic about these subjects and consistently excel in them.",
+                "I find them interesting, although I sometimes face challenges.",
+                "I can manage these subjects, but they aren't my favorite.",
+                "I struggle with these subjects and do not feel very comfortable with them."
+            ],
+            [
+                "I love the mix of theory and practice; it makes learning dynamic.",
+                "I enjoy both but lean slightly toward theoretical work.",
+                "I prefer hands-on practical work over extensive theory.",
+                "I'm not enthusiastic about practical work and would rather stick to theory."
+            ],
+            [
+                "I thrive under academic pressure.",
+                "I can manage but find it exhausting.",
+                "I prefer short, focused sessions.",
+                "I dislike intense studying."
+            ],
+            [
+                "I enjoy it and feel confident in front of an audience.",
+                "I'm comfortable with it but prefer smaller groups.",
+                "I find it stressful but can manage if necessary.",
+                "I avoid it whenever possible."
+            ]
+        ]
+
+        # Apply Ordinal Encoding
+        ordinal_encoder = OrdinalEncoder(categories=ordinal_order)
+        data[ordinal_columns] = ordinal_encoder.fit_transform(data[ordinal_columns])
+
+        # One-Hot Encode remaining categorical features
+        categorical_columns = [col for col in data.columns if col not in ordinal_columns]
+        onehot_encoder = OneHotEncoder(sparse_output=False)
+        onehot_encoded = onehot_encoder.fit_transform(data[categorical_columns])
+        onehot_df = pd.DataFrame(onehot_encoded, columns=onehot_encoder.get_feature_names_out(categorical_columns))
+
+        # Final input for model
+        final_df = pd.concat([data[ordinal_columns], onehot_df], axis=1)
+
+        # --- Prediction ---
+        features = final_df.to_numpy()
         prediction = rf_model.predict(features)
+
         return jsonify({'prediction': prediction.tolist()})
+
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
