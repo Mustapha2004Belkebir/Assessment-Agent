@@ -35,6 +35,10 @@ max_questions = 15
 def index():
     return "Flask App: Random Forest API & Gemini Career Assessment"
 
+# -------------------- Normalisation function --------------------
+def normalize_text(text):
+    return text.replace("’", "'").replace("“", "\"").replace("”", "\"")
+
 # -------------------- Random Forest Route --------------------
 @app.route('/predict', methods=['POST'])
 def predict():
@@ -82,6 +86,7 @@ def predict():
 
         # Apply Ordinal Encoding
         ordinal_encoder = OrdinalEncoder(categories=ordinal_order)
+        data[ordinal_columns] = data[ordinal_columns].applymap(normalize_text)
         data[ordinal_columns] = ordinal_encoder.fit_transform(data[ordinal_columns])
 
         # One-Hot Encode remaining categorical features
