@@ -83,7 +83,7 @@ def predict():
         }
 
         prediction = rf_model.predict(final_df)
-        predicted_class = prediction[0]
+        predicted_class = int(prediction[0])
         predicted_field = label_map.get(predicted_class, "Unknown")
 
         return jsonify({
