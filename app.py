@@ -20,6 +20,12 @@ gemini_model = genai.GenerativeModel('gemini-1.5-flash')  # Changed from 'gemini
 with open('random_forest.pkl', 'rb') as file:
     rf_model = pickle.load(file)
 
+with open("ordinal_encoder.pkl", "rb") as f:
+    ordinal_encoder = pickle.load(f)
+
+with open("onehot_encoder.pkl", "rb") as f:
+    onehot_encoder = pickle.load(f)
+
 # Initialize Flask app
 app = Flask(__name__)
 
@@ -43,67 +49,34 @@ def normalize_text(text):
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
-        # Load input data from frontend
         input_data = request.get_json()
-        answers = input_data['answers']  # Expecting a dict
-        
-        # Convert to DataFrame
-        data = pd.DataFrame([answers])  # One-row DataFrame
+        answers = input_data['answers']
+        data = pd.DataFrame([answers])
 
-        # --- Encoding Section ---
+        # Clean up any curly quotes
+        data = data.applymap(lambda x: x.replace("’", "'").replace("“", "\"").replace("”", "\""))
+
+        # Ordinal columns
         ordinal_columns = [
             "Do you enjoy and feel comfortable with subjects like mathematics, physics, and biology?",
             "Are you excited by combining theoretical learning with hands-on practical work?",
             "How do you handle long study hours and challenging academic content?",
             "How do you feel about public speaking or presenting?"
         ]
-        ordinal_order = [
-            [
-                "I am very enthusiastic about these subjects and consistently excel in them.",
-                "I find them interesting, although I sometimes face challenges.",
-                "I can manage these subjects, but they aren't my favorite.",
-                "I struggle with these subjects and do not feel very comfortable with them."
-            ],
-            [
-                "I love the mix of theory and practice; it makes learning dynamic.",
-                "I enjoy both but lean slightly toward theoretical work.",
-                "I prefer hands-on practical work over extensive theory.",
-                "I'm not enthusiastic about practical work and would rather stick to theory."
-            ],
-            [
-                "I thrive under academic pressure.",
-                "I can manage but find it exhausting.",
-                "I prefer short, focused sessions.",
-                "I dislike intense studying."
-            ],
-            [
-                "I enjoy it and feel confident in front of an audience.",
-                "I'm comfortable with it but prefer smaller groups.",
-                "I find it stressful but can manage if necessary.",
-                "I avoid it whenever possible."
-            ]
-        ]
 
-        # Apply Ordinal Encoding
-        ordinal_encoder = OrdinalEncoder(categories=ordinal_order)
-        data[ordinal_columns] = data[ordinal_columns].applymap(normalize_text)
-        data[ordinal_columns] = ordinal_encoder.fit_transform(data[ordinal_columns])
-
-        # One-Hot Encode remaining categorical features
+        # Transform using preloaded encoders
+        data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
         categorical_columns = [col for col in data.columns if col not in ordinal_columns]
-        onehot_encoder = OneHotEncoder(sparse_output=False)
-        onehot_encoded = onehot_encoder.fit_transform(data[categorical_columns])
+
+        onehot_encoded = onehot_encoder.transform(data[categorical_columns])
         onehot_df = pd.DataFrame(onehot_encoded, columns=onehot_encoder.get_feature_names_out(categorical_columns))
 
-        # Final input for model
-        final_df = pd.concat([data[ordinal_columns], onehot_df], axis=1)
-
-        # --- Prediction ---
-        features = final_df.to_numpy()
-        prediction = rf_model.predict(features)
+        # Final input
+        final_df = pd.concat([data[ordinal_columns].reset_index(drop=True), onehot_df.reset_index(drop=True)], axis=1)
+        prediction = rf_model.predict(final_df)
 
         return jsonify({'prediction': prediction.tolist()})
-
+    
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
