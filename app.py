@@ -73,9 +73,24 @@ def predict():
 
         # Final input
         final_df = pd.concat([data[ordinal_columns].reset_index(drop=True), onehot_df.reset_index(drop=True)], axis=1)
-        prediction = rf_model.predict(final_df)
+        # Mapping of class indices to field names
+        label_map = {
+            0: "Law",
+            1: "Agriculture",
+            2: "Computer Science",
+            3: "Medicine",
+            4: "Business"
+        }
 
-        return jsonify({'prediction': prediction.tolist()})
+        prediction = rf_model.predict(final_df)
+        predicted_class = prediction[0]
+        predicted_field = label_map.get(predicted_class, "Unknown")
+
+        return jsonify({
+            "prediction": predicted_class,
+            "field": predicted_field
+        })
+
     
     except Exception as e:
         return jsonify({"error": str(e)}), 400
