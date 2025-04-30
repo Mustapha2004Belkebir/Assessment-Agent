@@ -5,3 +5,4 @@ pandas
 gunicorn 
 python-dotenv
 google-generativeai
+CORS
