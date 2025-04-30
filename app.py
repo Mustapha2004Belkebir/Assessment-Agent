@@ -42,7 +42,7 @@ def index():
 
 # -------------------- Normalisation function --------------------
 def normalize_text(text):
-    return text.replace("'", "'").replace(""", "\"").replace(""", "\"")
+    return text.replace("’", "'").replace("“", "\"").replace("”", "\"")
 
 # -------------------- Random Forest Route --------------------
 @app.route('/predict', methods=['POST'])
@@ -53,7 +53,7 @@ def predict():
         data = pd.DataFrame([answers])
 
         # Clean up any curly quotes
-        data = data.applymap(lambda x: x.replace("'", "'").replace(""", "\"").replace(""", "\""))
+        data = data.applymap(lambda x: x.replace("’", "'").replace("“", "\"").replace("”", "\""))
 
         # Ordinal columns
         ordinal_columns = [
