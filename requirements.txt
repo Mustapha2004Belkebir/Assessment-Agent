@@ -6,3 +6,4 @@ gunicorn
 python-dotenv
 google-generativeai
 CORS
+flask-cors
