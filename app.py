@@ -13,8 +13,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 # Configure Gemini
 genai.configure(api_key=GOOGLE_API_KEY)
-# Updated to use an available model from your list
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')  # Changed from 'gemini-pro'
+gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Load Random Forest model
 with open('random_forest.pkl', 'rb') as file:
@@ -34,7 +33,7 @@ chat_session = None
 current_field = None
 assessment_in_progress = False
 question_count = 0
-max_questions = 15
+absolute_max_questions = 30  # Safety limit to prevent infinite questioning
 
 # -------------------- Home --------------------
 @app.route('/')
@@ -43,7 +42,7 @@ def index():
 
 # -------------------- Normalisation function --------------------
 def normalize_text(text):
-    return text.replace("’", "'").replace("“", "\"").replace("”", "\"")
+    return text.replace("'", "'").replace(""", "\"").replace(""", "\"")
 
 # -------------------- Random Forest Route --------------------
 @app.route('/predict', methods=['POST'])
@@ -54,7 +53,7 @@ def predict():
         data = pd.DataFrame([answers])
 
         # Clean up any curly quotes
-        data = data.applymap(lambda x: x.replace("’", "'").replace("“", "\"").replace("”", "\""))
+        data = data.applymap(lambda x: x.replace("'", "'").replace(""", "\"").replace(""", "\""))
 
         # Ordinal columns
         ordinal_columns = [
@@ -91,7 +90,6 @@ def predict():
             "field": predicted_field
         })
 
-    
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -116,29 +114,33 @@ def start_assessment():
         # Initialize chat session with empty history
         chat_session = gemini_model.start_chat(history=[])
         
-        # Send system prompt as the first message
+        # Send system prompt as the first message - removed min/max question constraints
         initial_prompt = f"""
         You are an assessment assistant for the field of {current_field}. Your task is to assess if the user is suitable for a career in {current_field}.
         
         Instructions:
         1. Ask one question at a time about their skills, interests, and experience relevant to {current_field}.
-        2. After receiving their answer, analyze it briefly, then ask the next question.
-        3. Ask a total of {max_questions} questions that cover different aspects of {current_field}.
-        4. Make your questions conversational and engaging.
-        5. Start directly with your first question without any introduction.
+        2. Make your questions conversational, engaging, and specific to different aspects of {current_field}.
+        3. You are free to ask as many questions as you need to make a thorough assessment. Use your judgment to determine when you have enough information.
+        4. Ensure your questions cover various aspects like aptitude, interest, relevant experience, and personality fit.
+        5. Each question should be concise and direct - aim for 1-3 sentences per question.
+        6. Ask your first question directly without an introduction.
+        7. When you feel you have enough information to make a proper assessment, end your response with the text "ASSESSMENT_READY".
         """
         
-        response = chat_session.send_message(initial_prompt)
+        # Send the initial prompt to set up the context
+        chat_session.send_message(initial_prompt)
         
-        # Ask LLM to generate the first question
-        response = chat_session.send_message("Please ask your first question about my suitability for this field.")
+        # Get the first question
+        first_q_prompt = "Please ask your first question to assess the user's suitability for this field."
+        response = chat_session.send_message(first_q_prompt)
         question_count += 1
         
         return jsonify({
             "response": response.text, 
+            "response_type": "question",
             "assessment_complete": False,
-            "question_number": question_count,
-            "total_questions": max_questions
+            "question_number": question_count
         })
     except Exception as e:
         return jsonify({"error": f"Assessment initialization error: {str(e)}"}), 500
@@ -151,6 +153,7 @@ def chat():
         if not chat_session or not current_field or not assessment_in_progress:
             return jsonify({
                 "response": "Please start the assessment first by selecting a field.", 
+                "response_type": "error",
                 "assessment_complete": False
             }), 400
 
@@ -162,47 +165,113 @@ def chat():
         # Get the user's message
         user_message = data['message']
         
-        # Send message to LLM
-        response = chat_session.send_message(user_message)
+        # Send user message and include instructions for next question in the same prompt
+        # Removed references to min_questions and max_questions constraints
+        combined_prompt = f"""
+        User response: {user_message}
+
+        Based on this response, please assess the information provided and then ask the next appropriate question 
+        to continue evaluating the user's suitability for {current_field}.
         
-        # Check if we've reached the max number of questions
-        if question_count >= max_questions:
+        Remember:
+        1. Make your question conversational and relevant to a different aspect of the field than previously covered.
+        2. This is question #{question_count + 1}. You've asked {question_count} questions so far.
+        3. You are free to continue asking questions until you feel you have enough information to make a thorough assessment.
+        4. Use your judgment to decide when you have sufficient information about the user's skills, interests, and aptitude.
+        5. When you feel you have enough information to make a proper assessment, end your response with the text "ASSESSMENT_READY".
+        """
+        
+        # Safety check to prevent infinite questioning (server-side protection)
+        if question_count >= absolute_max_questions:
+            combined_prompt += "\n\nYou have asked many questions already. Please conclude your assessment after this question by adding ASSESSMENT_READY to your response."
+        
+        # Send message to LLM - only one API call
+        response = chat_session.send_message(combined_prompt)
+        question_count += 1
+        
+        # Check if the LLM indicated it's ready for final assessment
+        # or if we've reached absolute max questions
+        assessment_ready = "ASSESSMENT_READY" in response.text or question_count >= absolute_max_questions
+        
+        if assessment_ready:
+            # Clean the response if needed
+            cleaned_response = response.text.replace("ASSESSMENT_READY", "").strip()
+            
             # Generate final assessment
             final_prompt = f"""
             Based on all the responses from the user, provide a comprehensive assessment of their suitability for a career in {current_field}.
             
-            Your assessment should include:
-            1. Strengths identified from their responses
-            2. Areas for improvement or skills they might need to develop
-            3. A clear recommendation on whether they should pursue this career path with a percentage match (e.g., "80% match with {current_field}")
-            4. Additional advice for success in this field
-            
-            Format your response with clear headings for each section and provide specific details based on their responses.
+            Your assessment must follow this exact structure with these exact headings and use JSON format:
+
+            Return ONLY a valid JSON object with these exact keys and nothing else:
+            {{
+                "suitability_score": "A number from 0-100 representing percentage match",
+                "strengths": ["strength1", "strength2", "strength3", ...],
+                "areas_for_improvement": ["area1", "area2", "area3", ...],
+                "recommendation": "YES or NO",
+                "recommendation_reason": "Brief explanation of your recommendation",
+                "alternative_fields": ["field1", "field2", "field3"],
+                "next_steps": ["step1", "step2", "step3"]
+            }}
+
+            Make sure your response is valid JSON that can be parsed. No markdown, no explanations outside the JSON.
             """
             
-            response = chat_session.send_message(final_prompt)
+            assessment_response = chat_session.send_message(final_prompt)
             assessment_in_progress = False
             
-            return jsonify({
-                "response": response.text,
-                "assessment_complete": True,
-                "field": current_field
-            })
+            # Extract JSON from the response
+            try:
+                import json
+                import re
+                
+                # Find JSON pattern in the response
+                json_match = re.search(r'({[\s\S]*})', assessment_response.text)
+                if json_match:
+                    assessment_json = json.loads(json_match.group(1))
+                    
+                    # Return structured assessment data
+                    return jsonify({
+                        "response_type": "final_assessment",
+                        "assessment_complete": True,
+                        "field": current_field,
+                        "assessment_data": {
+                            "suitability_score": assessment_json.get("suitability_score", "N/A"),
+                            "strengths": assessment_json.get("strengths", []),
+                            "areas_for_improvement": assessment_json.get("areas_for_improvement", []),
+                            "recommendation": assessment_json.get("recommendation", "N/A"),
+                            "recommendation_reason": assessment_json.get("recommendation_reason", "N/A"),
+                            "alternative_fields": assessment_json.get("alternative_fields", []),
+                            "next_steps": assessment_json.get("next_steps", [])
+                        },
+                        # Include full text as backup
+                        "full_response": assessment_response.text
+                    })
+                else:
+                    # Fallback if JSON extraction fails
+                    return jsonify({
+                        "response": assessment_response.text,
+                        "response_type": "final_assessment",
+                        "assessment_complete": True,
+                        "field": current_field,
+                        "parsing_error": "Could not parse structured data from response"
+                    })
+            except Exception as e:
+                # Fallback if JSON processing fails
+                return jsonify({
+                    "response": assessment_response.text,
+                    "response_type": "final_assessment",
+                    "assessment_complete": True,
+                    "field": current_field,
+                    "parsing_error": str(e)
+                })
         else:
-            # Ask the next question
-            next_prompt = f"""
-            Thank you for your response. Please ask the next question to continue assessing the user's suitability for {current_field}.
-            Remember to make it conversational and relevant to a different aspect of the field than previously covered.
-            """
-            
-            response = chat_session.send_message(next_prompt)
-            question_count += 1
-            
+            # Return the response directly without sending another prompt
             return jsonify({
                 "response": response.text,
+                "response_type": "question",
                 "assessment_complete": False,
-                "question_number": question_count,
-                "total_questions": max_questions
+                "question_number": question_count
             })
     except Exception as e:
         return jsonify({"error": f"Chat error: {str(e)}"}), 500
