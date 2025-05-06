@@ -8,28 +8,58 @@ from dotenv import load_dotenv
 from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder
 import os
 from itertools import combinations
+import traceback  # Added for better error logging
 
 # Load environment variables
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    print("WARNING: GOOGLE_API_KEY environment variable not found!")
 
 # Configure Gemini
-genai.configure(api_key=GOOGLE_API_KEY)
-gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+try:
+    genai.configure(api_key=GOOGLE_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+    print("Gemini model initialized successfully")
+except Exception as e:
+    print(f"Error initializing Gemini model: {str(e)}")
+    # Set a flag to disable Gemini functionality if it fails to initialize
+    gemini_available = False
+else:
+    gemini_available = True
 
-# Load Random Forest model
-with open('best_model.pkl', 'rb') as file:
-    rf_model = pickle.load(file)
+# Load Random Forest model and other files with better error handling
+try:
+    with open('best_model.pkl', 'rb') as file:
+        rf_model = pickle.load(file)
+    print("Random Forest model loaded successfully")
+except Exception as e:
+    print(f"Error loading Random Forest model: {str(e)}")
+    rf_model = None
 
-with open("ordinal_encoder.pkl", "rb") as f:
-    ordinal_encoder = pickle.load(f)
+try:
+    with open("ordinal_encoder.pkl", "rb") as f:
+        ordinal_encoder = pickle.load(f)
+    print("Ordinal encoder loaded successfully")
+except Exception as e:
+    print(f"Error loading ordinal encoder: {str(e)}")
+    ordinal_encoder = None
 
-with open("onehot_encoder.pkl", "rb") as f:
-    onehot_encoder = pickle.load(f)
+try:
+    with open("onehot_encoder.pkl", "rb") as f:
+        onehot_encoder = pickle.load(f)
+    print("One-hot encoder loaded successfully")
+except Exception as e:
+    print(f"Error loading one-hot encoder: {str(e)}")
+    onehot_encoder = None
 
-# Load encoding dictionaries for feature grouping
-with open("encoding_dicts.pkl", "rb") as f:
-    encoding_dicts = pickle.load(f)
+try:
+    with open("encoding_dicts.pkl", "rb") as f:
+        encoding_dicts = pickle.load(f)
+    print("Encoding dictionaries loaded successfully")
+except Exception as e:
+    print(f"Error loading encoding dictionaries: {str(e)}")
+    encoding_dicts = None
 
 # Feature grouping parameters
 min_occurs = 4
@@ -42,18 +72,26 @@ def dict_decode(encoding, value, min_occurs):
 
 # Load the selected feature indices
 selected_feature_indices = [0, 82, 110, 122, 421, 451, 483, 489, 514, 530, 673, 798]
+print(f"Selected feature indices: {selected_feature_indices}")
+print(f"Max selected feature index: {max(selected_feature_indices)}")
 
 # Try to load feature column names if available
 try:
     with open("feature_columns.pkl", "rb") as f:
         selected_columns = pickle.load(f)
     use_column_names = True
+    print(f"Feature columns loaded successfully: {len(selected_columns)} columns")
 except FileNotFoundError:
     use_column_names = False
+    print("Feature columns file not found, will use indices instead")
+except Exception as e:
+    use_column_names = False
+    print(f"Error loading feature columns: {str(e)}")
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # This enables CORS for all routes
+app.config['PROPAGATE_EXCEPTIONS'] = True  # Add this to see detailed errors
 
 # Global state for Gemini chat
 chat_session = None
@@ -65,22 +103,49 @@ absolute_max_questions = 30  # Safety limit to prevent infinite questioning
 # -------------------- Home --------------------
 @app.route('/')
 def index():
-    return "Flask App: Logistic Regression API & Gemini Career Assessment"
+    return "Flask App: Random Forest API & Gemini Career Assessment"
 
 # -------------------- Normalisation function --------------------
 def normalize_text(text):
+    if not isinstance(text, str):
+        return text
     return text.replace("'", "'").replace(""", "\"").replace(""", "\"")
 
 # -------------------- Random Forest Route --------------------
 @app.route('/predict', methods=['POST'])
 def predict():
     try:
+        print("\n--- New prediction request received ---")
+        
+        # Check if model and encoders are loaded
+        if rf_model is None or ordinal_encoder is None or onehot_encoder is None or encoding_dicts is None:
+            return jsonify({"error": "Model or encoders not loaded. Check server logs."}), 500
+        
+        # Parse request data
         input_data = request.get_json()
+        print(f"Request data received: {input_data.keys() if input_data else 'None'}")
+        
+        if not input_data or 'answers' not in input_data:
+            return jsonify({"error": "Invalid request format. 'answers' key is required."}), 400
+        
         answers = input_data['answers']
-        data = pd.DataFrame([answers])
+        print(f"Answers keys: {answers.keys() if answers else 'None'}")
+        
+        # Create DataFrame
+        try:
+            data = pd.DataFrame([answers])
+            print(f"Created DataFrame with shape: {data.shape}")
+        except Exception as e:
+            print(f"Error creating DataFrame: {str(e)}")
+            return jsonify({"error": f"Error creating DataFrame: {str(e)}"}), 400
 
         # Clean up any curly quotes and strip whitespace
-        data = data.applymap(lambda x: x.replace("'", "'").replace(""", "\"").replace(""", "\"").strip() if isinstance(x, str) else x)
+        try:
+            data = data.applymap(lambda x: normalize_text(x) if isinstance(x, str) else x)
+            print("Normalized text in DataFrame")
+        except Exception as e:
+            print(f"Error normalizing text: {str(e)}")
+            return jsonify({"error": f"Error normalizing text: {str(e)}"}), 400
 
         # Ordinal columns
         ordinal_columns = [
@@ -90,59 +155,133 @@ def predict():
             "How comfortable are you navigating sensitive or emotional situations?",
             "How do you feel about public speaking or presenting?"
         ]
+        
+        # Check if all ordinal columns are present
+        missing_columns = [col for col in ordinal_columns if col not in data.columns]
+        if missing_columns:
+            print(f"Missing required columns: {missing_columns}")
+            return jsonify({"error": f"Missing required columns: {missing_columns}"}), 400
 
         # Transform using preloaded encoders
-        data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
-        categorical_columns = [col for col in data.columns if col not in ordinal_columns]
-
-        onehot_encoded = onehot_encoder.transform(data[categorical_columns])
-        onehot_df = pd.DataFrame(onehot_encoded, columns=onehot_encoder.get_feature_names_out(categorical_columns))
+        try:
+            print("Applying ordinal encoding")
+            data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
+            print("Ordinal encoding complete")
+            
+            categorical_columns = [col for col in data.columns if col not in ordinal_columns]
+            print(f"Categorical columns: {len(categorical_columns)}")
+            
+            print("Applying one-hot encoding")
+            onehot_encoded = onehot_encoder.transform(data[categorical_columns])
+            print(f"One-hot encoded shape: {onehot_encoded.shape}")
+            
+            onehot_df = pd.DataFrame(
+                onehot_encoded, 
+                columns=onehot_encoder.get_feature_names_out(categorical_columns)
+            )
+            print(f"One-hot DataFrame shape: {onehot_df.shape}")
+        except Exception as e:
+            print(f"Error in encoding: {str(e)}")
+            print(traceback.format_exc())
+            return jsonify({"error": f"Error in encoding: {str(e)}"}), 400
 
         # Combine preprocessed data
-        preprocessed_df = pd.concat([data[ordinal_columns].reset_index(drop=True), 
-                                   onehot_df.reset_index(drop=True)], axis=1)
+        try:
+            preprocessed_df = pd.concat([
+                data[ordinal_columns].reset_index(drop=True), 
+                onehot_df.reset_index(drop=True)
+            ], axis=1)
+            print(f"Preprocessed DataFrame shape: {preprocessed_df.shape}")
+        except Exception as e:
+            print(f"Error combining preprocessed data: {str(e)}")
+            return jsonify({"error": f"Error combining preprocessed data: {str(e)}"}), 400
         
         # --------- FEATURE GROUPING LOGIC ----------
-        # Apply feature grouping using the saved encoding dictionaries
-        test_grouped_data = []
+        try:
+            print("Starting feature grouping")
+            test_grouped_data = []
 
-        for i, degree in enumerate(degrees):
-            # Use the encoding dictionary saved from training
-            saved_encoding = encoding_dicts[i]
-            
-            # Apply the encoding to test data
-            m, n = preprocessed_df.shape
-            new_data = []
-            for indexes in combinations(range(n), degree):
-                # Only use dict_decode with the saved encoding, not dict_encode
-                new_data.append([dict_decode(saved_encoding, tuple(v), min_occurs) 
-                                for v in preprocessed_df.iloc[:, list(indexes)].values])
-            
-            test_grouped_data.append(np.array(new_data).T)
+            for i, degree in enumerate(degrees):
+                print(f"Processing degree {degree}")
+                # Use the encoding dictionary saved from training
+                saved_encoding = encoding_dicts[i]
+                
+                # Apply the encoding to test data
+                m, n = preprocessed_df.shape
+                print(f"Preprocessed data shape: {m}x{n}")
+                new_data = []
+                
+                for indexes in combinations(range(n), degree):
+                    # Only use dict_decode with the saved encoding, not dict_encode
+                    new_data.append([dict_decode(saved_encoding, tuple(v), min_occurs) 
+                                    for v in preprocessed_df.iloc[:, list(indexes)].values])
+                
+                test_grouped_data.append(np.array(new_data).T)
+                print(f"Added grouped data for degree {degree} with shape {test_grouped_data[-1].shape}")
 
-        # Combine the grouped features
-        test_grouped_features = np.hstack(test_grouped_data)
-        test_grouped_df = pd.DataFrame(test_grouped_features, 
-                                    columns=[f"grouped_{i}" for i in range(test_grouped_features.shape[1])])
+            # Combine the grouped features
+            test_grouped_features = np.hstack(test_grouped_data)
+            print(f"Combined grouped features shape: {test_grouped_features.shape}")
+            
+            test_grouped_df = pd.DataFrame(test_grouped_features, 
+                                        columns=[f"grouped_{i}" for i in range(test_grouped_features.shape[1])])
+            print(f"Grouped DataFrame shape: {test_grouped_df.shape}")
+        except Exception as e:
+            print(f"Error in feature grouping: {str(e)}")
+            print(traceback.format_exc())
+            return jsonify({"error": f"Error in feature grouping: {str(e)}"}), 400
 
         # Combine with other preprocessed features
-        full_features_df = pd.concat([preprocessed_df.reset_index(drop=True), 
-                                    test_grouped_df.reset_index(drop=True)], axis=1)
+        try:
+            full_features_df = pd.concat([
+                preprocessed_df.reset_index(drop=True), 
+                test_grouped_df.reset_index(drop=True)
+            ], axis=1)
+            print(f"Full features DataFrame shape: {full_features_df.shape}")
+        except Exception as e:
+            print(f"Error combining with grouped features: {str(e)}")
+            return jsonify({"error": f"Error combining with grouped features: {str(e)}"}), 400
         
         # --------- FEATURE SELECTION LOGIC ----------
-        # Select only the required features that were used during training
-        if use_column_names:
-            # Use column names if available
-            final_df = full_features_df[selected_columns]
-        else:
-            # Otherwise use positional indexing
-            if len(full_features_df.columns) > max(selected_feature_indices):
-                final_df = full_features_df.iloc[:, selected_feature_indices]
+        try:
+            print("Starting feature selection")
+            print(f"Full features shape: {full_features_df.shape}")
+            print(f"Use column names: {use_column_names}")
+            print(f"Max selected index: {max(selected_feature_indices)}")
+            
+            # Select only the required features that were used during training
+            if use_column_names:
+                # Use column names if available
+                print(f"Selected columns: {len(selected_columns)}")
+                print(f"Available columns: {len(full_features_df.columns)}")
+                
+                # Check if all selected columns are available
+                missing_selected_columns = [col for col in selected_columns if col not in full_features_df.columns]
+                if missing_selected_columns:
+                    print(f"Warning: Missing some selected columns: {missing_selected_columns[:5]}...")
+                    # Use only available columns
+                    available_selected_columns = [col for col in selected_columns if col in full_features_df.columns]
+                    print(f"Using {len(available_selected_columns)} available columns")
+                    final_df = full_features_df[available_selected_columns]
+                else:
+                    final_df = full_features_df[selected_columns]
             else:
-                # Handle the case where column count doesn't match
-                print(f"Warning: Data has {len(full_features_df.columns)} columns, but trying to access column {max(selected_feature_indices)}")
-                valid_indices = [idx for idx in selected_feature_indices if idx < len(full_features_df.columns)]
-                final_df = full_features_df.iloc[:, valid_indices]
+                # Otherwise use positional indexing
+                if len(full_features_df.columns) > max(selected_feature_indices):
+                    print("Using selected feature indices")
+                    final_df = full_features_df.iloc[:, selected_feature_indices]
+                else:
+                    # Handle the case where column count doesn't match
+                    print(f"Warning: Data has {len(full_features_df.columns)} columns, but trying to access column {max(selected_feature_indices)}")
+                    valid_indices = [idx for idx in selected_feature_indices if idx < len(full_features_df.columns)]
+                    print(f"Valid indices: {valid_indices}")
+                    final_df = full_features_df.iloc[:, valid_indices]
+            
+            print(f"Final feature shape: {final_df.shape}")
+        except Exception as e:
+            print(f"Error in feature selection: {str(e)}")
+            print(traceback.format_exc())
+            return jsonify({"error": f"Error in feature selection: {str(e)}"}), 400
         
         # Mapping of class indices to field names
         label_map = {
@@ -153,17 +292,27 @@ def predict():
             4: "Business"
         }
 
-        prediction = rf_model.predict(final_df)
-        predicted_class = int(prediction[0])
-        predicted_field = label_map.get(predicted_class, "Unknown")
-
-        # Get probabilities if the model supports it
         try:
-            probabilities = rf_model.predict_proba(final_df)[0]
-            probs_dict = {label_map[i]: float(prob) for i, prob in enumerate(probabilities)}
-        except:
-            probs_dict = {}
+            print("Making prediction with model")
+            prediction = rf_model.predict(final_df)
+            predicted_class = int(prediction[0])
+            predicted_field = label_map.get(predicted_class, "Unknown")
+            print(f"Predicted class: {predicted_class}, field: {predicted_field}")
 
+            # Get probabilities if the model supports it
+            try:
+                probabilities = rf_model.predict_proba(final_df)[0]
+                probs_dict = {label_map[i]: float(prob) for i, prob in enumerate(probabilities)}
+                print(f"Prediction probabilities: {probs_dict}")
+            except Exception as e:
+                print(f"Warning: Could not get prediction probabilities: {str(e)}")
+                probs_dict = {}
+        except Exception as e:
+            print(f"Error making prediction: {str(e)}")
+            print(traceback.format_exc())
+            return jsonify({"error": f"Error making prediction: {str(e)}"}), 400
+
+        print("Prediction completed successfully")
         return jsonify({
             "prediction": predicted_class,
             "field": predicted_field,
@@ -171,9 +320,9 @@ def predict():
         })
 
     except Exception as e:
-        import traceback
-        traceback_str = traceback.format_exc()
-        return jsonify({"error": str(e), "traceback": traceback_str}), 400
+        print(f"Unexpected error in predict route: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({"error": str(e), "traceback": traceback.format_exc()}), 500
 
 # -------------------- Gemini Assessment Routes --------------------
 @app.route('/start_assessment', methods=['POST'])
@@ -181,6 +330,10 @@ def start_assessment():
     global chat_session, current_field, assessment_in_progress, question_count
     
     try:
+        # Check if Gemini is available
+        if not gemini_available:
+            return jsonify({"error": "Gemini API is not available. Check server logs."}), 500
+            
         # Get data from request
         data = request.get_json()
         if not data or 'field' not in data:
@@ -225,6 +378,8 @@ def start_assessment():
             "question_number": question_count
         })
     except Exception as e:
+        print(f"Assessment initialization error: {str(e)}")
+        print(traceback.format_exc())
         return jsonify({"error": f"Assessment initialization error: {str(e)}"}), 500
 
 @app.route('/chat', methods=['POST'])
@@ -232,6 +387,9 @@ def chat():
     global chat_session, current_field, question_count, assessment_in_progress
     
     try:
+        if not gemini_available:
+            return jsonify({"error": "Gemini API is not available. Check server logs."}), 500
+            
         if not chat_session or not current_field or not assessment_in_progress:
             return jsonify({
                 "response": "Please start the assessment first by selecting a field.", 
@@ -356,8 +514,11 @@ def chat():
                 "question_number": question_count
             })
     except Exception as e:
+        print(f"Chat error: {str(e)}")
+        print(traceback.format_exc())
         return jsonify({"error": f"Chat error: {str(e)}"}), 500
     
 # -------------------- Run App --------------------
 if __name__ == '__main__':
+    app.config['PROPAGATE_EXCEPTIONS'] = True  # Propagate exceptions to see detailed errors
     app.run(debug=True)
