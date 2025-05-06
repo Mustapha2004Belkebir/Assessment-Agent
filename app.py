@@ -18,17 +18,17 @@ genai.configure(api_key=GOOGLE_API_KEY)
 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Load Random Forest model
-with open('/pkl files/best_model.pkl', 'rb') as file:
+with open('best_model.pkl', 'rb') as file:
     rf_model = pickle.load(file)
 
-with open("/pkl files/ordinal_encoder.pkl", "rb") as f:
+with open("ordinal_encoder.pkl", "rb") as f:
     ordinal_encoder = pickle.load(f)
 
-with open("/pkl files/onehot_encoder.pkl", "rb") as f:
+with open("onehot_encoder.pkl", "rb") as f:
     onehot_encoder = pickle.load(f)
 
 # Load encoding dictionaries for feature grouping
-with open("/pkl files/encoding_dicts.pkl", "rb") as f:
+with open("encoding_dicts.pkl", "rb") as f:
     encoding_dicts = pickle.load(f)
 
 # Feature grouping parameters
