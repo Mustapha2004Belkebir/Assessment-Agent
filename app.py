@@ -12,14 +12,24 @@ from difflib import SequenceMatcher
 
 # Function to find closest string match
 def find_closest_match(text, options):
-    if not text or not options:
+    if not text:
+        return None
+    
+    # Handle NumPy arrays properly
+    if hasattr(options, 'size') and options.size == 0:
+        return None
+    
+    if not isinstance(options, (list, tuple)) and hasattr(options, 'tolist'):
+        options = options.tolist()  # Convert NumPy array to list
+        
+    if not options:  # Now safely check if list is empty
         return None
     
     best_match = None
     best_ratio = 0
     
     for option in options:
-        ratio = SequenceMatcher(None, text.lower(), option.lower()).ratio()
+        ratio = SequenceMatcher(None, str(text).lower(), str(option).lower()).ratio()
         if ratio > best_ratio:
             best_ratio = ratio
             best_match = option
@@ -180,7 +190,7 @@ def predict():
         try:
             # First attempt - direct transformation
             data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
-        except ValueError as e:
+        except Exception as e:
             print(f"Transformation error: {e}")
             
             # Map unknown categories to closest known ones based on similarity or default values
@@ -198,26 +208,97 @@ def predict():
                 if col in data.columns:
                     # Get the known categories for this column from the encoder
                     try:
-                        known_categories = ordinal_encoder.categories_[ordinal_columns.index(col)]
-                        current_value = data[col].values[0]
-                        
-                        if current_value not in known_categories:
-                            # Try to find the closest match first
-                            closest_match = find_closest_match(current_value, known_categories)
+                        column_index = ordinal_columns.index(col)
+                        if column_index < len(ordinal_encoder.categories_):
+                            known_categories = ordinal_encoder.categories_[column_index]
+                            current_value = str(data[col].values[0])
                             
-                            if closest_match:
-                                print(f"Replacing unknown value '{current_value}' with closest match '{closest_match}'")
-                                data.at[0, col] = closest_match
-                            else:
-                                # Use default if no good match found
-                                print(f"Replacing unknown value '{current_value}' with default '{ordinal_default_values[col]}'")
-                                data.at[0, col] = ordinal_default_values[col]
-                    except (IndexError, AttributeError) as e:
-                        print(f"Error accessing categories: {e}")
+                            # Check if current value is in known categories
+                            value_found = False
+                            for category in known_categories:
+                                if current_value == category:
+                                    value_found = True
+                                    break
+                                    
+                            if not value_found:
+                                # Try to find the closest match first
+                                try:
+                                    closest_match = find_closest_match(current_value, known_categories)
+                                    
+                                    if closest_match:
+                                        print(f"Replacing unknown value '{current_value}' with closest match '{closest_match}'")
+                                        data.at[0, col] = closest_match
+                                    else:
+                                        # Use default if no good match found
+                                        print(f"Replacing unknown value '{current_value}' with default '{ordinal_default_values[col]}'")
+                                        data.at[0, col] = ordinal_default_values[col]
+                                except Exception as e:
+                                    print(f"Error finding closest match: {e}")
+                                    data.at[0, col] = ordinal_default_values[col]
+                        else:
+                            print(f"Column index {column_index} out of range for encoder categories")
+                            data.at[0, col] = ordinal_default_values[col]
+                    except Exception as e:
+                        print(f"Error processing column {col}: {e}")
                         data.at[0, col] = ordinal_default_values[col]
             
             # Try transformation again with corrected values
-            data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
+            try:
+                data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
+            except Exception as e:
+                # If still failing, use manual categorical-to-ordinal mapping as a last resort
+                print(f"Second transformation attempt failed: {e}")
+                print("Falling back to direct categorical mapping")
+                
+                # Define known ordinal mappings based on the training data
+                direct_mapping = {
+                    "Do you enjoy and feel comfortable with subjects like mathematics, physics, and biology?": {
+                        "I am very enthusiastic about these subjects and consistently excel in them.": 0,
+                        "I find them interesting, although I sometimes face challenges.": 1,
+                        "I can manage these subjects, but they aren't my favorite.": 2,
+                        "I struggle with these subjects and do not feel very comfortable with them.": 3
+                    },
+                    "Are you excited by combining theoretical learning with hands-on practical work?": {
+                        "I love the mix of theory and practice; it makes learning dynamic.": 0,
+                        "I enjoy both but lean slightly toward theoretical work.": 1,
+                        "I prefer hands-on practical work over extensive theory.": 2,
+                        "I'm not enthusiastic about practical work and would rather stick to theory": 3
+                    },
+                    "How do you handle long study hours and challenging academic content?": {
+                        "I thrive under academic pressure.": 0,
+                        "I can manage but find it exhausting.": 1,
+                        "I prefer short, focused sessions.": 2,
+                        "I dislike intense studying.": 3
+                    },
+                    "How comfortable are you navigating sensitive or emotional situations?": {
+                        "Very comfortable; I thrive in such situations": 0,
+                        "Somewhat comfortable; I can handle it when needed": 1,
+                        "Uncomfortable; I prefer to avoid such situations": 2
+                    },
+                    "How do you feel about public speaking or presenting?": {
+                        "I enjoy it and feel confident in front of an audience.": 0,
+                        "I'm comfortable with it but prefer smaller groups.": 1,
+                        "I find it stressful but can manage if necessary.": 2,
+                        "I avoid it whenever possible": 3
+                    }
+                }
+                
+                # Apply direct mapping or use fallback values
+                for col in ordinal_columns:
+                    if col in data.columns:
+                        current_value = str(data[col].values[0])
+                        
+                        # Try exact match first
+                        if current_value in direct_mapping[col]:
+                            data[col] = direct_mapping[col][current_value]
+                        else:
+                            # Try to find closest match in our mapping keys
+                            closest_match = find_closest_match(current_value, list(direct_mapping[col].keys()))
+                            if closest_match:
+                                data[col] = direct_mapping[col][closest_match]
+                            else:
+                                # Ultimate fallback - middle value for each scale
+                                data[col] = len(direct_mapping[col]) // 2  # Middle value by default
         categorical_columns = [col for col in data.columns if col not in ordinal_columns]
 
         onehot_encoded = onehot_encoder.transform(data[categorical_columns])
