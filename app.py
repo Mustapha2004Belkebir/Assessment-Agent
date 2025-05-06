@@ -19,7 +19,7 @@ gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Load Random Forest model
 with open('best_model.pkl', 'rb') as file:
-    rf_model = pickle.load(file)
+    lr_model = pickle.load(file)
 
 with open("ordinal_encoder.pkl", "rb") as f:
     ordinal_encoder = pickle.load(f)
@@ -65,7 +65,7 @@ absolute_max_questions = 30  # Safety limit to prevent infinite questioning
 # -------------------- Home --------------------
 @app.route('/')
 def index():
-    return "Flask App: Random Forest API & Gemini Career Assessment"
+    return "Flask App: Logistic Regression API & Gemini Career Assessment"
 
 # -------------------- Normalisation function --------------------
 def normalize_text(text):
@@ -79,8 +79,8 @@ def predict():
         answers = input_data['answers']
         data = pd.DataFrame([answers])
 
-        # Clean up any curly quotes
-        data = data.applymap(lambda x: x.replace("'", "'").replace(""", "\"").replace(""", "\"") if isinstance(x, str) else x)
+        # Clean up any curly quotes and strip whitespace
+        data = data.applymap(lambda x: x.replace("'", "'").replace(""", "\"").replace(""", "\"").strip() if isinstance(x, str) else x)
 
         # Ordinal columns
         ordinal_columns = [
@@ -153,13 +153,13 @@ def predict():
             4: "Business"
         }
 
-        prediction = rf_model.predict(final_df)
+        prediction = lr_model.predict(final_df)
         predicted_class = int(prediction[0])
         predicted_field = label_map.get(predicted_class, "Unknown")
 
         # Get probabilities if the model supports it
         try:
-            probabilities = rf_model.predict_proba(final_df)[0]
+            probabilities = lr_model.predict_proba(final_df)[0]
             probs_dict = {label_map[i]: float(prob) for i, prob in enumerate(probabilities)}
         except:
             probs_dict = {}
