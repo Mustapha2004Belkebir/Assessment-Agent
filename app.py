@@ -7,6 +7,7 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder
 import os
+from itertools import combinations
 
 # Load environment variables
 load_dotenv()
@@ -17,14 +18,38 @@ genai.configure(api_key=GOOGLE_API_KEY)
 gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Load Random Forest model
-with open('random_forest.pkl', 'rb') as file:
+with open('/pkl files/best_model.pkl', 'rb') as file:
     rf_model = pickle.load(file)
 
-with open("ordinal_encoder.pkl", "rb") as f:
+with open("/pkl files/ordinal_encoder.pkl", "rb") as f:
     ordinal_encoder = pickle.load(f)
 
-with open("onehot_encoder.pkl", "rb") as f:
+with open("/pkl files/onehot_encoder.pkl", "rb") as f:
     onehot_encoder = pickle.load(f)
+
+# Load encoding dictionaries for feature grouping
+with open("/pkl files/encoding_dicts.pkl", "rb") as f:
+    encoding_dicts = pickle.load(f)
+
+# Feature grouping parameters
+min_occurs = 4
+degrees = [2, 3]
+
+# Function for feature grouping
+def dict_decode(encoding, value, min_occurs):
+    enc = encoding.get(value, {'code': -1, 'count': 0})
+    return enc['code'] if enc['count'] >= min_occurs else -1
+
+# Load the selected feature indices
+selected_feature_indices = [0, 82, 110, 122, 421, 451, 483, 489, 514, 530, 673, 798]
+
+# Try to load feature column names if available
+try:
+    with open("feature_columns.pkl", "rb") as f:
+        selected_columns = pickle.load(f)
+    use_column_names = True
+except FileNotFoundError:
+    use_column_names = False
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -44,7 +69,7 @@ def index():
 
 # -------------------- Normalisation function --------------------
 def normalize_text(text):
-    return text.replace("’", "'").replace("“", "\"").replace("”", "\"")
+    return text.replace("'", "'").replace(""", "\"").replace(""", "\"")
 
 # -------------------- Random Forest Route --------------------
 @app.route('/predict', methods=['POST'])
@@ -55,13 +80,14 @@ def predict():
         data = pd.DataFrame([answers])
 
         # Clean up any curly quotes
-        data = data.applymap(lambda x: x.replace("’", "'").replace("“", "\"").replace("”", "\""))
+        data = data.applymap(lambda x: x.replace("'", "'").replace(""", "\"").replace(""", "\"") if isinstance(x, str) else x)
 
         # Ordinal columns
         ordinal_columns = [
             "Do you enjoy and feel comfortable with subjects like mathematics, physics, and biology?",
             "Are you excited by combining theoretical learning with hands-on practical work?",
             "How do you handle long study hours and challenging academic content?",
+            "How comfortable are you navigating sensitive or emotional situations?",
             "How do you feel about public speaking or presenting?"
         ]
 
@@ -72,8 +98,52 @@ def predict():
         onehot_encoded = onehot_encoder.transform(data[categorical_columns])
         onehot_df = pd.DataFrame(onehot_encoded, columns=onehot_encoder.get_feature_names_out(categorical_columns))
 
-        # Final input
-        final_df = pd.concat([data[ordinal_columns].reset_index(drop=True), onehot_df.reset_index(drop=True)], axis=1)
+        # Combine preprocessed data
+        preprocessed_df = pd.concat([data[ordinal_columns].reset_index(drop=True), 
+                                   onehot_df.reset_index(drop=True)], axis=1)
+        
+        # --------- FEATURE GROUPING LOGIC ----------
+        # Apply feature grouping using the saved encoding dictionaries
+        test_grouped_data = []
+
+        for i, degree in enumerate(degrees):
+            # Use the encoding dictionary saved from training
+            saved_encoding = encoding_dicts[i]
+            
+            # Apply the encoding to test data
+            m, n = preprocessed_df.shape
+            new_data = []
+            for indexes in combinations(range(n), degree):
+                # Only use dict_decode with the saved encoding, not dict_encode
+                new_data.append([dict_decode(saved_encoding, tuple(v), min_occurs) 
+                                for v in preprocessed_df.iloc[:, list(indexes)].values])
+            
+            test_grouped_data.append(np.array(new_data).T)
+
+        # Combine the grouped features
+        test_grouped_features = np.hstack(test_grouped_data)
+        test_grouped_df = pd.DataFrame(test_grouped_features, 
+                                    columns=[f"grouped_{i}" for i in range(test_grouped_features.shape[1])])
+
+        # Combine with other preprocessed features
+        full_features_df = pd.concat([preprocessed_df.reset_index(drop=True), 
+                                    test_grouped_df.reset_index(drop=True)], axis=1)
+        
+        # --------- FEATURE SELECTION LOGIC ----------
+        # Select only the required features that were used during training
+        if use_column_names:
+            # Use column names if available
+            final_df = full_features_df[selected_columns]
+        else:
+            # Otherwise use positional indexing
+            if len(full_features_df.columns) > max(selected_feature_indices):
+                final_df = full_features_df.iloc[:, selected_feature_indices]
+            else:
+                # Handle the case where column count doesn't match
+                print(f"Warning: Data has {len(full_features_df.columns)} columns, but trying to access column {max(selected_feature_indices)}")
+                valid_indices = [idx for idx in selected_feature_indices if idx < len(full_features_df.columns)]
+                final_df = full_features_df.iloc[:, valid_indices]
+        
         # Mapping of class indices to field names
         label_map = {
             0: "Law",
@@ -87,13 +157,23 @@ def predict():
         predicted_class = int(prediction[0])
         predicted_field = label_map.get(predicted_class, "Unknown")
 
+        # Get probabilities if the model supports it
+        try:
+            probabilities = rf_model.predict_proba(final_df)[0]
+            probs_dict = {label_map[i]: float(prob) for i, prob in enumerate(probabilities)}
+        except:
+            probs_dict = {}
+
         return jsonify({
             "prediction": predicted_class,
-            "field": predicted_field
+            "field": predicted_field,
+            "probabilities": probs_dict
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        import traceback
+        traceback_str = traceback.format_exc()
+        return jsonify({"error": str(e), "traceback": traceback_str}), 400
 
 # -------------------- Gemini Assessment Routes --------------------
 @app.route('/start_assessment', methods=['POST'])
