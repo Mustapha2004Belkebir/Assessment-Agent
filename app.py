@@ -8,6 +8,26 @@ from dotenv import load_dotenv
 from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder
 import os
 from itertools import combinations
+from difflib import SequenceMatcher
+
+# Function to find closest string match
+def find_closest_match(text, options):
+    if not text or not options:
+        return None
+    
+    best_match = None
+    best_ratio = 0
+    
+    for option in options:
+        ratio = SequenceMatcher(None, text.lower(), option.lower()).ratio()
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_match = option
+    
+    # Only return a match if the similarity is above a threshold
+    if best_ratio > 0.7:
+        return best_match
+    return None
 
 # Load environment variables
 load_dotenv()
@@ -19,7 +39,7 @@ gemini_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Load Random Forest model
 with open('best_model.pkl', 'rb') as file:
-    lr_model = pickle.load(file)
+    rf_model = pickle.load(file)
 
 with open("ordinal_encoder.pkl", "rb") as f:
     ordinal_encoder = pickle.load(f)
@@ -91,8 +111,113 @@ def predict():
             "How do you feel about public speaking or presenting?"
         ]
 
-        # Transform using preloaded encoders
-        data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
+        # Define standardized response mappings to handle variations in text responses
+        response_mappings = {
+            # Q1: Mathematics, physics, and biology
+            "I am very enthusiastic about these subjects and consistently excel in them": "I am very enthusiastic about these subjects and consistently excel in them.",
+            "I am very enthusiastic about these subjects and consistently excel in them.": "I am very enthusiastic about these subjects and consistently excel in them.",
+            "I find them interesting, although I sometimes face challenges": "I find them interesting, although I sometimes face challenges.",
+            "I find them interesting, although I sometimes face challenges.": "I find them interesting, although I sometimes face challenges.",
+            "I can manage these subjects, but they aren't my favorite": "I can manage these subjects, but they aren't my favorite.",
+            "I can manage these subjects, but they aren't my favorite.": "I can manage these subjects, but they aren't my favorite.",
+            "I can manage these subjects but they aren't my favorite": "I can manage these subjects, but they aren't my favorite.",
+            "I can manage these subjects, but they are not my favorite": "I can manage these subjects, but they aren't my favorite.",
+            "I can manage these subjects, but they are not my favorite.": "I can manage these subjects, but they aren't my favorite.",
+            "I struggle with these subjects and do not feel very comfortable with them": "I struggle with these subjects and do not feel very comfortable with them.",
+            "I struggle with these subjects and do not feel very comfortable with them.": "I struggle with these subjects and do not feel very comfortable with them.",
+            
+            # Q2: Theory and practice
+            "I love the mix of theory and practice; it makes learning dynamic": "I love the mix of theory and practice; it makes learning dynamic.",
+            "I love the mix of theory and practice; it makes learning dynamic.": "I love the mix of theory and practice; it makes learning dynamic.",
+            "I enjoy both but lean slightly toward theoretical work": "I enjoy both but lean slightly toward theoretical work.",
+            "I enjoy both but lean slightly toward theoretical work.": "I enjoy both but lean slightly toward theoretical work.",
+            "I prefer hands-on practical work over extensive theory": "I prefer hands-on practical work over extensive theory.",
+            "I prefer hands-on practical work over extensive theory.": "I prefer hands-on practical work over extensive theory.",
+            "I'm not enthusiastic about practical work and would rather stick to theory": "I'm not enthusiastic about practical work and would rather stick to theory",
+            "I'm not enthusiastic about practical work and would rather stick to theory.": "I'm not enthusiastic about practical work and would rather stick to theory",
+            
+            # Q3: Academic pressure
+            "I thrive under academic pressure": "I thrive under academic pressure.",
+            "I thrive under academic pressure.": "I thrive under academic pressure.",
+            "I can manage but find it exhausting": "I can manage but find it exhausting.",
+            "I can manage but find it exhausting.": "I can manage but find it exhausting.",
+            "I prefer short, focused sessions": "I prefer short, focused sessions.",
+            "I prefer short, focused sessions.": "I prefer short, focused sessions.",
+            "I dislike intense studying": "I dislike intense studying.",
+            "I dislike intense studying.": "I dislike intense studying.",
+            
+            # Q4: Sensitive situations
+            "Very comfortable; I thrive in such situations": "Very comfortable; I thrive in such situations",
+            "Very comfortable; I thrive in such situations.": "Very comfortable; I thrive in such situations",
+            "Somewhat comfortable; I can handle it when needed": "Somewhat comfortable; I can handle it when needed",
+            "Somewhat comfortable; I can handle it when needed.": "Somewhat comfortable; I can handle it when needed",
+            "Uncomfortable; I prefer to avoid such situations": "Uncomfortable; I prefer to avoid such situations",
+            "Uncomfortable; I prefer to avoid such situations.": "Uncomfortable; I prefer to avoid such situations",
+            
+            # Q5: Public speaking
+            "I enjoy it and feel confident in front of an audience": "I enjoy it and feel confident in front of an audience.",
+            "I enjoy it and feel confident in front of an audience.": "I enjoy it and feel confident in front of an audience.",
+            "I'm comfortable with it but prefer smaller groups": "I'm comfortable with it but prefer smaller groups.",
+            "I'm comfortable with it but prefer smaller groups.": "I'm comfortable with it but prefer smaller groups.",
+            "I find it stressful but can manage if necessary": "I find it stressful but can manage if necessary.",
+            "I find it stressful but can manage if necessary.": "I find it stressful but can manage if necessary.",
+            "I avoid it whenever possible": "I avoid it whenever possible",
+            "I avoid it whenever possible.": "I avoid it whenever possible"
+        }
+
+        # Standardize responses before encoding
+        for col in ordinal_columns:
+            if col in data.columns:
+                data[col] = data[col].apply(lambda x: response_mappings.get(x, x) if isinstance(x, str) else x)
+        
+        # Print debugging info before transformation
+        print("Data before transformation:")
+        for col in ordinal_columns:
+            if col in data.columns:
+                print(f"{col}: {data[col].values[0]}")
+
+        # Try to transform, with fallback options
+        try:
+            # First attempt - direct transformation
+            data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
+        except ValueError as e:
+            print(f"Transformation error: {e}")
+            
+            # Map unknown categories to closest known ones based on similarity or default values
+            # This is a fallback approach
+            ordinal_default_values = {
+                "Do you enjoy and feel comfortable with subjects like mathematics, physics, and biology?": "I find them interesting, although I sometimes face challenges.",
+                "Are you excited by combining theoretical learning with hands-on practical work?": "I enjoy both but lean slightly toward theoretical work.",
+                "How do you handle long study hours and challenging academic content?": "I can manage but find it exhausting.",
+                "How comfortable are you navigating sensitive or emotional situations?": "Somewhat comfortable; I can handle it when needed",
+                "How do you feel about public speaking or presenting?": "I find it stressful but can manage if necessary."
+            }
+            
+            # Replace any problematic values with best matches or defaults
+            for col in ordinal_columns:
+                if col in data.columns:
+                    # Get the known categories for this column from the encoder
+                    try:
+                        known_categories = ordinal_encoder.categories_[ordinal_columns.index(col)]
+                        current_value = data[col].values[0]
+                        
+                        if current_value not in known_categories:
+                            # Try to find the closest match first
+                            closest_match = find_closest_match(current_value, known_categories)
+                            
+                            if closest_match:
+                                print(f"Replacing unknown value '{current_value}' with closest match '{closest_match}'")
+                                data.at[0, col] = closest_match
+                            else:
+                                # Use default if no good match found
+                                print(f"Replacing unknown value '{current_value}' with default '{ordinal_default_values[col]}'")
+                                data.at[0, col] = ordinal_default_values[col]
+                    except (IndexError, AttributeError) as e:
+                        print(f"Error accessing categories: {e}")
+                        data.at[0, col] = ordinal_default_values[col]
+            
+            # Try transformation again with corrected values
+            data[ordinal_columns] = ordinal_encoder.transform(data[ordinal_columns])
         categorical_columns = [col for col in data.columns if col not in ordinal_columns]
 
         onehot_encoded = onehot_encoder.transform(data[categorical_columns])
@@ -153,13 +278,13 @@ def predict():
             4: "Business"
         }
 
-        prediction = lr_model.predict(final_df)
+        prediction = rf_model.predict(final_df)
         predicted_class = int(prediction[0])
         predicted_field = label_map.get(predicted_class, "Unknown")
 
         # Get probabilities if the model supports it
         try:
-            probabilities = lr_model.predict_proba(final_df)[0]
+            probabilities = rf_model.predict_proba(final_df)[0]
             probs_dict = {label_map[i]: float(prob) for i, prob in enumerate(probabilities)}
         except:
             probs_dict = {}
