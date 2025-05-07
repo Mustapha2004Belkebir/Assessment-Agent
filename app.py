@@ -88,12 +88,10 @@ except Exception as e:
     use_column_names = False
     print(f"Error loading feature columns: {str(e)}")
 
-# Initialize Flask app
 app = Flask(__name__)
 CORS(app)  # This enables CORS for all routes
 app.config['PROPAGATE_EXCEPTIONS'] = True  # Add this to see detailed errors
 
-# Global state for Gemini chat
 chat_session = None
 current_field = None
 assessment_in_progress = False
@@ -521,4 +519,4 @@ def chat():
 # -------------------- Run App --------------------
 if __name__ == '__main__':
     app.config['PROPAGATE_EXCEPTIONS'] = True  # Propagate exceptions to see detailed errors
-    app.run(debug=True)
+    app.run(debug=True);
