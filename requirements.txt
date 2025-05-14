@@ -7,3 +7,15 @@ python-dotenv
 google-generativeai
 CORS
 flask-cors
+
+# Web Framework and Utilities
+Werkzeug
+
+# Natural Language Processing
+spacy
+# NOTE: After installing requirements, you must also run:
+# python -m spacy download en_core_web_sm
+
+# Document Processing
+PyPDF2
+python-docx

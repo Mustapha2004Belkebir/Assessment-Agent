@@ -10,6 +10,13 @@ import os
 from itertools import combinations
 import traceback  # Added for better error logging
 
+import tempfile
+from werkzeug.utils import secure_filename
+import PyPDF2
+import docx
+import re
+import spacy
+
 # Load environment variables
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
@@ -341,31 +348,38 @@ def start_assessment():
         question_count = 0
         assessment_in_progress = True
         
-        # Get the field directly from the request
+        # Get the field and additional info from the request
         current_field = data['field']
+        education_level = data.get('education_level', 'Not specified')
+        prior_exposure = data.get('prior_exposure', 'Not specified')
         
         # Initialize chat session with empty history
         chat_session = gemini_model.start_chat(history=[])
         
-        # Send system prompt as the first message - removed min/max question constraints
+        # Send system prompt with the additional user information
         initial_prompt = f"""
         You are an assessment assistant for the field of {current_field}. Your task is to assess if the user is suitable for a career in {current_field}.
+        
+        User information:
+        - Education Level: {education_level}
+        - Prior Exposure to {current_field}: {prior_exposure}
         
         Instructions:
         1. Ask one question at a time about their skills, interests, and experience relevant to {current_field}.
         2. Make your questions conversational, engaging, and specific to different aspects of {current_field}.
-        3. You are free to ask as many questions as you need to make a thorough assessment. Use your judgment to determine when you have enough information.
-        4. Ensure your questions cover various aspects like aptitude, interest, relevant experience, and personality fit.
-        5. Each question should be concise and direct - aim for 1-3 sentences per question.
-        6. Ask your first question directly without an introduction.
-        7. When you feel you have enough information to make a proper assessment, end your response with the text "ASSESSMENT_READY".
+        3. Customize your questions based on their education level ({education_level}) and prior exposure ({prior_exposure}).
+        4. You are free to ask as many questions as you need to make a thorough assessment. Use your judgment to determine when you have enough information.
+        5. Ensure your questions cover various aspects like aptitude, interest, relevant experience, and personality fit.
+        6. Each question should be concise and direct - aim for 1-3 sentences per question.
+        7. Ask your first question directly without an introduction.
+        8. When you feel you have enough information to make a proper assessment, end your response with the text "ASSESSMENT_READY".
         """
         
         # Send the initial prompt to set up the context
         chat_session.send_message(initial_prompt)
         
         # Get the first question
-        first_q_prompt = "Please ask your first question to assess the user's suitability for this field."
+        first_q_prompt = "Please ask your first question to assess the user's suitability for this field, considering their education level and prior exposure."
         response = chat_session.send_message(first_q_prompt)
         question_count += 1
         
@@ -373,7 +387,7 @@ def start_assessment():
             "response": response.text, 
             "response_type": "question",
             "assessment_complete": False,
-            "question_number": question_count
+            "question_number": question_count,
         })
     except Exception as e:
         print(f"Assessment initialization error: {str(e)}")
@@ -515,6 +529,259 @@ def chat():
         print(f"Chat error: {str(e)}")
         print(traceback.format_exc())
         return jsonify({"error": f"Chat error: {str(e)}"}), 500
+    
+
+# -------------------- File Upload Route --------------------#
+# Load SpaCy model for NER
+try:
+    nlp = spacy.load("en_core_web_sm")
+except:
+    # If model isn't downloaded, provide instructions
+    print("Please download the SpaCy model with: python -m spacy download en_core_web_sm")
+    nlp = None
+
+# Configure upload settings
+ALLOWED_EXTENSIONS = {'pdf', 'doc', 'docx', 'txt'}
+UPLOAD_FOLDER = tempfile.gettempdir()
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload size
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def extract_text_from_pdf(pdf_path):
+    """Extract text from PDF files"""
+    text = ""
+    with open(pdf_path, 'rb') as file:
+        reader = PyPDF2.PdfReader(file)
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+    return text
+
+def extract_text_from_docx(docx_path):
+    """Extract text from DOCX files"""
+    doc = docx.Document(docx_path)
+    text = ""
+    for paragraph in doc.paragraphs:
+        text += paragraph.text + "\n"
+    return text
+
+def extract_text_from_file(file_path):
+    """Extract text based on file type"""
+    file_extension = file_path.split('.')[-1].lower()
+    
+    if file_extension == 'pdf':
+        return extract_text_from_pdf(file_path)
+    elif file_extension == 'docx':
+        return extract_text_from_docx(file_path)
+    elif file_extension == 'txt':
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+            return file.read()
+    else:
+        return None
+
+def parse_resume(text):
+    """Parse resume text to extract structured information"""
+    if not text:
+        return {"error": "Could not extract text from document"}
+    
+    # Basic structure to store extracted information
+    resume_data = {
+        "contact_info": {},
+        "education": [],
+        "work_experience": [],
+        "skills": [],
+        "raw_text": text[:1000] + "..." if len(text) > 1000 else text  # Truncated raw text
+    }
+    
+    # Extract email
+    email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+    emails = re.findall(email_pattern, text)
+    if emails:
+        resume_data["contact_info"]["email"] = emails[0]
+    
+    # Extract phone number
+    phone_pattern = r'\b(?:\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'
+    phones = re.findall(phone_pattern, text)
+    if phones:
+        resume_data["contact_info"]["phone"] = phones[0]
+    
+    # Use SpaCy for named entity recognition if available
+    if nlp:
+        doc = nlp(text[:500000])  # Limit text length for processing
+        
+        # Extract skills - look for technical terms and keywords
+        skill_keywords = ["Python", "JavaScript", "Java", "C++", "React", "Node.js", 
+                          "SQL", "Machine Learning", "Data Analysis", "Project Management",
+                          "Microsoft Office", "Leadership", "Communication", "AWS", "Docker",
+                          "Kubernetes", "Git", "REST API", "HTML", "CSS", "Excel", "Marketing",
+                          "Sales", "Customer Service", "Research", "Analysis", "Design"]
+        
+        for keyword in skill_keywords:
+            if re.search(r'\b' + re.escape(keyword) + r'\b', text, re.IGNORECASE):
+                resume_data["skills"].append(keyword)
+        
+        # Extract education information - basic pattern matching
+        education_patterns = [
+            r'(?:bachelor|master|phd|doctor|associate|b\.s\.|m\.s\.|b\.a\.|m\.a\.|ph\.d\.)\s+(?:of|in|degree)?\s+([^,\n]+)',
+            r'(?:university|college|institute|school) of ([^,\n]+)',
+        ]
+        
+        for pattern in education_patterns:
+            education_matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in education_matches:
+                if match and match.strip() and len(match) < 100:  # Sanity check on match length
+                    resume_data["education"].append(match.strip())
+        
+        # Extract potential companies/organizations
+        for ent in doc.ents:
+            if ent.label_ == "ORG" and len(ent.text) > 2:
+                # Check if it looks like a company
+                if not any(term.lower() in ent.text.lower() for term in ["university", "college", "school"]):
+                    resume_data["work_experience"].append(ent.text)
+        
+        # Remove duplicates
+        resume_data["education"] = list(set(resume_data["education"]))[:5]  # Limit to top 5
+        resume_data["work_experience"] = list(set(resume_data["work_experience"]))[:5]  # Limit to top 5
+        resume_data["skills"] = list(set(resume_data["skills"]))[:15]  # Limit to top 15
+    
+    return resume_data
+
+@app.route('/resume-assessment', methods=['POST'])
+def resume_assessment():
+    try:
+        # Check if Gemini is available
+        if not gemini_available:
+            return jsonify({"error": "Gemini API is not available. Check server logs."}), 500
+            
+        # Check if a file was uploaded
+        if 'resume' not in request.files:
+            return jsonify({"error": "No file part"}), 400
+            
+        # Check if target field was provided
+        if 'field' not in request.form:
+            return jsonify({"error": "Target field is required"}), 400
+            
+        file = request.files['resume']
+        field = request.form['field']
+        
+        # Check if file is empty
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+        
+        # Check if file type is allowed
+        if not allowed_file(file.filename):
+            return jsonify({"error": "File type not allowed"}), 400
+        
+        # Save and process the file
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+        
+        try:
+            # Extract text from file
+            text = extract_text_from_file(file_path)
+            
+            # Parse the resume
+            resume_data = parse_resume(text)
+            
+            # Delete the temporary file
+            os.remove(file_path)
+            
+            # Prepare resume summary for Gemini
+            resume_summary = f"""
+            Field of interest: {field}
+            
+            Resume Summary:
+            - Contact: {resume_data.get('contact_info', {})}
+            - Education: {', '.join(resume_data.get('education', [])[:3]) or 'Not specified'}
+            - Experience: {', '.join(resume_data.get('work_experience', [])[:3]) or 'Not specified'}
+            - Skills: {', '.join(resume_data.get('skills', [])[:10]) or 'Not specified'}
+            
+            Raw Text Extract:
+            {resume_data.get('raw_text', 'No text available')[:2000]}
+            """
+            
+            # Send to Gemini for direct assessment
+            assessment_prompt = f"""
+            You are a career assessment specialist. Based on the resume information below, evaluate this person's 
+            suitability for a career in {field}.
+            
+            {resume_summary}
+            
+            Analyze this resume information and assess suitability for {field}. Return ONLY a valid JSON object with these exact keys:
+            {{
+                "suitability_score": "A number from 0-100 representing percentage match",
+                "strengths": ["strength1", "strength2", "strength3", ...],
+                "areas_for_improvement": ["area1", "area2", "area3", ...],
+                "recommendation": "YES or NO",
+                "recommendation_reason": "Brief explanation of your recommendation",
+                "alternative_fields": ["field1", "field2", "field3"],
+                "next_steps": ["step1", "step2", "step3"]
+            }}
+            
+            Make sure your response is valid JSON that can be parsed. No markdown, no explanations outside the JSON.
+            """
+            
+            # Create a one-time chat for this assessment
+            assessment_chat = gemini_model.start_chat(history=[])
+            assessment_response = assessment_chat.send_message(assessment_prompt)
+            
+            # Extract JSON from the response
+            try:
+                import json
+                import re
+                
+                # Find JSON pattern in the response
+                json_match = re.search(r'({[\s\S]*})', assessment_response.text)
+                if json_match:
+                    assessment_json = json.loads(json_match.group(1))
+                    
+                    # Return structured assessment data
+                    return jsonify({
+                        "response_type": "resume_assessment",
+                        "field": field,
+                        "resume_data": resume_data,
+                        "assessment_data": {
+                            "suitability_score": assessment_json.get("suitability_score", "N/A"),
+                            "strengths": assessment_json.get("strengths", []),
+                            "areas_for_improvement": assessment_json.get("areas_for_improvement", []),
+                            "recommendation": assessment_json.get("recommendation", "N/A"),
+                            "recommendation_reason": assessment_json.get("recommendation_reason", "N/A"),
+                            "alternative_fields": assessment_json.get("alternative_fields", []),
+                            "next_steps": assessment_json.get("next_steps", [])
+                        }
+                    })
+                else:
+                    # Fallback if JSON extraction fails
+                    return jsonify({
+                        "response": assessment_response.text,
+                        "response_type": "resume_assessment",
+                        "field": field,
+                        "resume_data": resume_data,
+                        "parsing_error": "Could not parse structured data from response"
+                    })
+            except Exception as e:
+                # Fallback if JSON processing fails
+                return jsonify({
+                    "response": assessment_response.text,
+                    "response_type": "resume_assessment",
+                    "field": field,
+                    "resume_data": resume_data,
+                    "parsing_error": str(e)
+                })
+                
+        except Exception as e:
+            # Delete the temporary file in case of error
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            return jsonify({"error": f"Error processing file: {str(e)}"}), 500
+            
+    except Exception as e:
+        print(f"Resume assessment error: {str(e)}")
+        print(traceback.format_exc())
+        return jsonify({"error": f"Resume assessment error: {str(e)}"}), 500
     
 # -------------------- Run App --------------------
 if __name__ == '__main__':
