@@ -507,4 +507,4 @@ def resume_assessment():
 # -------------------- Run App --------------------
 if __name__ == '__main__':
     app.config['PROPAGATE_EXCEPTIONS'] = True  # Propagate exceptions to see detailed errors
-    app.run(debug=True);
+    app.run(debug=True)
